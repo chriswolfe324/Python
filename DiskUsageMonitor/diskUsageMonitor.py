@@ -1,3 +1,4 @@
+import math
 import os
 from proxmoxer import ProxmoxAPI
 # proxmoxer is the library that talks to my proxmox server
@@ -24,18 +25,42 @@ proxmox = ProxmoxAPI(
   verify_ssl=False   #don't give me certificate errors
 )
 
-
-
+def percentage_used(used, total):
+  if not total:
+    return None
+  return ( used / total ) * 100
 
 
 def main():
   # get my proxmox nodes
   nodes = proxmox.nodes.get()
 
-
   # loop through each node in my cluster and get the node name
   for node in nodes:
     node_name = node["node"]
+
+
+
+    print(f"\nNode: {node_name} (storage usage)")
+
+    for s in storages:
+      # get the storage name. if no name, set it equal to "unknown-storage"
+      storage_name = s.get("storage", "unknown-storage")
+      used = s.get("used")
+      total = s.get("total")
+
+      # call the function, pass in used and total
+      pct = percentage_used(used, total)
+
+      if pct is None:
+        print(f"- {storage_name}: unknown")
+      else:
+        print(f"- {storage_name}: {math.floor(pct)}%")
+
+
+    # give me all storage devices attached to this node
+    storages = proxmox.nodes(node_name).storage.get()
+
     #get the VMs on my node. store them in a list
     vms = proxmox.nodes(node_name).qemu.get()
     
@@ -43,7 +68,7 @@ def main():
     # try to get the name, but if it doesn't exist, use 'unknown'
     for vm in vms:
       vm_name = vm.get("name", "unknown")
-      print(f"VM: {vm_name}")
+   
 
     #get all the containers on my node. store them in a list
     containers = proxmox.nodes(node_name).lxc.get()
@@ -51,35 +76,11 @@ def main():
     # try to get the name, but if it doesn't exist, use 'unknown'
     for container in containers:
       cnt_name = container.get("name", "unknown")
-      print(f"CT: {cnt_name}")
 
 
 if __name__ == "__main__":
   main()
 
-
-
-# 1. Change it so that it reads disk usage instead
+# 1. Change it so that it reads disk usage instead (you'll read the disk usage via the node exporter that you need to install on each container and VM)
 # 2. include disk usage for the host itself
 # 3. if above 80, email you
-
-
-
-
-# import subprocess
-
-# du = subprocess.run(["df", "/"],
-#     capture_output=True,
-#     text=True)
-
-# print(int(du.stdout.splitlines()[1].split()[4][:-1]))
-
-# if int(du.stdout.splitlines()[1].split()[4][:-1]) > 12:
-#   print("bigger than 12")
-
-
-
-
-
-#capture the whole output of "df /". split it into lines a grab the second line. Split that on the whitespaces and grab the 5th data. Remove the % from the end. Turn it into an int
-
