@@ -13,7 +13,7 @@ token_secret = os.getenv("PVE_TOKEN_SECRET")
 gmail_user = os.getenv("GMAIL_USER")         
 gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
 
-if not all([host, user, token_name, token_secret]):
+if not all([host, user, token_name, token_secret, gmail_user, gmail_app_password]):
   raise SystemExit("Missing one or more environment variables: PVE_HOST, PVE_USER, PVE_TOKEN_NAME, PVE_TOKEN_SECRET, GMAIL_USER, or GMAIL_APP_PASSWORD")
 
 proxmox = ProxmoxAPI(
@@ -49,7 +49,7 @@ def main():
   alerts = []
   for node in nodes:
     node_name = node["node"]
- #--------------------------------VM Section--------------------------------------------
+ #--------------------------------Host Section--------------------------------------------
  #--------------------------------------------------------------------------------------
     storages = proxmox.nodes(node_name).storage.get()
     for s in storages:
@@ -67,22 +67,38 @@ def main():
     for vm in vms:
       vm_name = vm.get("name", "unknown")
       vmid = vm.get("vmid")
-      agent_net = proxmox.nodes(node_name).qemu(vmid).agent("network-get-interfaces").get()
-      ip_list = agent_net[0].get("ip-addresses", [])
-      for ip in ip_list:
-        ip_addr = ip.get("ip-address")
-        if ip_addr == "127.0.0.1":
-           continue
-        resp = requests.get(f"http://{ip_addr}:9100/metrics")
-        lines = resp.text.splitlines()
-        size_line = next((l for l in lines if "node_filesystem_size_bytes" in l and 'mountpoint="/"' in l), None)
-        size_bytes = int(size_line.split()[-1]) if size_line else None
-        avail_line = next((l for l in lines if "node_filesystem_avail_bytes" in l and 'mountpoint="/"' in l), None)
-        avail_bytes = int(avail_line.split()[-1]) if avail_line else None
-        used_bytes = (size_bytes - avail_bytes) if size_bytes and avail_bytes else None
-        disk_pct = percentage_used(used_bytes, size_bytes)
-        if disk_pct is not None and disk_pct >= 80:
-           alerts.append(f"VM {vm_name} ({ip_addr}) disk usage: {math.floor(disk_pct)}%")
+      if vm.get("status") != "running":
+        continue
+      try:
+        agent_net = proxmox.nodes(node_name).qemu(vmid).agent("network-get-interfaces").get()
+      except Exception:
+        continue
+      if isinstance(agent_net, dict) and "result" in agent_net:
+        agent_net = agent_net["result"]
+      if not agent_net:
+        continue
+      for iface in agent_net:
+        ip_list = iface.get("ip-addresses", [])
+        for ip in ip_list:
+          ip_addr = ip.get("ip-address")
+          if not ip_addr or ip_addr == "127.0.0.1" or ip_addr == "::1" or ":" in ip_addr or ip_addr.count(".") != 3:
+            continue
+          try:
+            resp = requests.get(f"http://{ip_addr}:9100/metrics", timeout=3)
+          except Exception:
+            continue
+          lines = resp.text.splitlines()
+          size_line = next(
+            (l for l in lines if "node_filesystem_size_bytes" in l and 'mountpoint="/"' in l),
+            None
+          )
+          size_bytes = int(float(size_line.split()[-1])) if size_line else None
+          avail_line = next((l for l in lines if "node_filesystem_avail_bytes" in l and 'mountpoint="/"' in l), None)
+          avail_bytes = int(float(avail_line.split()[-1])) if avail_line else None
+          used_bytes = (size_bytes - avail_bytes) if size_bytes and avail_bytes else None
+          disk_pct = percentage_used(used_bytes, size_bytes)
+          if disk_pct is not None and disk_pct >= 80:
+            alerts.append(f"VM {vm_name} ({ip_addr}) disk usage: {math.floor(disk_pct)}%")
     #---------------------------------Container Section-------------------------------------
     #---------------------------------------------------------------------------------------
     containers = proxmox.nodes(node_name).lxc.get()
@@ -92,10 +108,13 @@ def main():
       interfaces = proxmox.nodes(node_name).lxc(ctid).interfaces.get()
       for iface in interfaces:
         for addr in iface.get("inet", []):
-          ip_addr = addr.get("address")
-          if ip_addr == "127.0.0.1":
+          ip_addr = addr.get("address") if isinstance(addr, dict) else addr
+          if not ip_addr or ip_addr == "127.0.0.1" or ip_addr == "::1" or ":" in ip_addr or ip_addr.count(".") !=3:
             continue
-          resp = requests.get(f"http://{ip_addr}:9100/metrics")
+          try:
+            resp = requests.get(f"http://{ip_addr}:9100/metrics", timeout=3)
+          except Exception:
+            continue
           lines = resp.text.splitlines()
           size_line = next(
             (l for l in lines if "node_filesystem_size_bytes" in l and 'mountpoint="/"' in l),
@@ -106,8 +125,8 @@ def main():
             None
           )
           if size_line and avail_line:
-            size_bytes = int(size_line.split()[-1])
-            avail_bytes = int(avail_line.split()[-1])
+            size_bytes = int(float(size_line.split()[-1])) if size_line else None
+            avail_bytes = int(float(avail_line.split()[-1])) if avail_line else None
             used_bytes = size_bytes - avail_bytes
             disk_pct = percentage_used(used_bytes, size_bytes)
             if disk_pct is not None and disk_pct >= 80:
